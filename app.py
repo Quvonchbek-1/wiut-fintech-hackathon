@@ -142,24 +142,10 @@ def to_binary(s: pd.Series) -> pd.Series | None:
     return (s == minority).astype(float).where(s.notna())
 
 
-MAX_ONE_HOT_CARDINALITY = 30  # bundan ko'p noyob qiymatga ega ustunlar one-hot qilinmaydi
+MAX_ONE_HOT_CARDINALITY = 30
 
 
 def make_X(frame: pd.DataFrame, feats: list[str]) -> tuple[pd.DataFrame, list[str]]:
-    """
-    RAM-xavfsiz feature matritsasi tuzadi.
-
-    - Sana/vaqt ustunlari epoch soniyalarga aylantiriladi.
-    - Kam noyob qiymatli matn/kategoriya ustunlari one-hot (get_dummies) qilinadi.
-    - Ko'p noyob qiymatli (masalan, ID, tranzaksiya raqami, erkin matn) ustunlar
-      one-hot qilinmaydi — aks holda minglab ustun yaratilib, Streamlit Cloud'ning
-      cheklangan RAM'ini to'ldirib, ilova uzilib qolishi (connection lost) mumkin.
-      Bunday ustunlar o'rniga "chastota kodlash" (frequency encoding) qo'llanadi:
-      har bir qiymat o'zining datasetdagi uchrash sonига almashtiriladi — bitta
-      raqamli ustun, qo'shimcha xotira sarflamaydi.
-
-    Qaytaradi: (X, tashlab_yuborilgan_ogohlantirishlar)
-    """
     sub = frame[feats].copy()
     notes: list[str] = []
 
@@ -180,7 +166,6 @@ def make_X(frame: pd.DataFrame, feats: list[str]) -> tuple[pd.DataFrame, list[st
     X = pd.get_dummies(sub).astype(float)
     X = X.replace([np.inf, -np.inf], np.nan)
     return X.fillna(0), notes
-
 
 
 @dataclass(frozen=True)
@@ -262,16 +247,14 @@ st.markdown(
 )
 
 # ============================================================
-# MA'LUMOT YUKLASH
+# MA'LUMOT YUKLASH VA CHAP MENYU SOZLAMALARI
 # ============================================================
 with st.sidebar:
-    st.header("⚙️ Sozlamalar")
+    st.header("⚙️ Boshqaruv paneli")
     uploaded = st.file_uploader("Boshqa CSV yuklash", type="csv")
-    if st.button("🔄 Keshni tozalash", use_container_width=True):
-        st.cache_data.clear()
-        st.cache_resource.clear()
-        st.rerun()
-
+    
+    guessed = guess_target(load_csv(uploaded.getvalue() if uploaded else DATA_PATH) if True else None) # type: ignore
+    
 try:
     df_full = load_csv(uploaded.getvalue() if uploaded else DATA_PATH)
 except FileNotFoundError:
@@ -292,6 +275,18 @@ with st.sidebar:
     default_idx = options.index(guessed) if guessed else 0
     target_col = st.selectbox("🎯 Target (alert/risk) ustuni", options, index=default_idx)
     st.caption(f"📄 {len(df_full):,} qator · {len(df_full.columns)} ustun")
+
+    st.divider()
+    with st.expander("🎛️ Kengaytirilgan model sozlamalari", expanded=False):
+        st.markdown("Hakamlar uchun texnik giperparametrlar:")
+        n_est = st.slider("Daraxtlar soni (n_estimators)", 50, 300, 100, step=10)
+        depth = st.slider("Maksimal chuqurlik (max_depth)", 3, 15, 6)
+        n_splits_ui = st.slider("CV bo'laklari (folds)", 2, 5, 5)
+
+    if st.button("🔄 Keshni tozalash", use_container_width=True):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.rerun()
 
 y_full = to_binary(df_full[target_col]) if target_col != "(yo'q)" else None
 if target_col != "(yo'q)" and y_full is None:
@@ -316,7 +311,7 @@ tabs = st.tabs([
     "🔗 Bog'liqlik", "🕒 Vaqt tendensiyasi", "📋 Ma'lumotlar",
 ])
 
-# ---------- Xulosa ----------
+# ---------- 1. Xulosa ----------
 with tabs[0]:
     st.subheader("💡 Loyiha haqida")
     st.markdown(
@@ -341,9 +336,9 @@ with tabs[0]:
         st.success("Bo'sh qiymatlar topilmadi ✅")
     else:
         show(px.bar(miss.head(15) * 100, template="plotly_dark", title="Ustunlar bo'yicha bo'sh qiymatlar (%)",
-                     labels={"value": "%", "index": "Ustun"}, color_discrete_sequence=[CORAL]), height=360)
+                    labels={"value": "%", "index": "Ustun"}, color_discrete_sequence=[CORAL]), height=360)
 
-# ---------- AI Risk Prioritization ----------
+# ---------- 2. AI Risk Prioritization ----------
 with tabs[1]:
     st.subheader("🤖 AI yordamida signallarni ustuvorlashtirish")
     if y_full is None:
@@ -351,12 +346,8 @@ with tabs[1]:
     else:
         cand = [c for c in df_full.columns if c != target_col]
 
-        with st.expander("⚙️ Model sozlamalari", expanded=True):
-            feats = st.multiselect("Model omillari (Features)", cand, default=cand)
-            s1, s2, s3 = st.columns(3)
-            n_est = s1.slider("Daraxtlar soni", 50, 300, 100, step=10)
-            depth = s2.slider("Maksimal chuqurlik", 3, 15, 6)
-            n_splits_ui = s3.slider("CV bo'laklari (folds)", 2, 5, 5)
+        with st.expander("⚙️ Model omillari (Features)", expanded=True):
+            feats = st.multiselect("Modelga beriladigan ustunlar", cand, default=cand)
 
         mask = y_full.notna().values
         y_m = y_full[mask].astype(int).values
@@ -376,12 +367,7 @@ with tabs[1]:
                         st.caption(f"• {note}")
 
             if X_all.shape[1] == 0:
-                st.error(
-                    "❌ Tanlangan omillardan modelga yaroqli ustun hosil bo'lmadi. "
-                    "Bu odatda barcha tanlangan ustunlar bo'sh yoki noyob (unique) "
-                    "matn/ID qiymatlar bo'lganda yuz beradi. Boshqa omillarni tanlab ko'ring:"
-                )
-                st.write(df_full[feats].dtypes.rename("Tur").to_frame())
+                st.error("❌ Tanlangan omillardan modelga yaroqli ustun hosil bo'lmadi.")
                 st.stop()
 
             X_m = X_all[mask]
@@ -401,15 +387,15 @@ with tabs[1]:
             with g1:
                 roc_fig = go.Figure()
                 roc_fig.add_trace(go.Scatter(x=result.fpr, y=result.tpr, mode="lines",
-                                              line=dict(color=BLUE, width=3), name="Model"))
+                                             line=dict(color=BLUE, width=3), name="Model"))
                 roc_fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines",
-                                              line=dict(color=MUTED, dash="dash"), name="Tasodifiy"))
+                                             line=dict(color=MUTED, dash="dash"), name="Tasodifiy"))
                 roc_fig.update_layout(title="ROC egri chizig'i", xaxis_title="False Positive Rate", yaxis_title="True Positive Rate")
                 show(roc_fig, height=360)
             with g2:
                 pr_fig = go.Figure()
                 pr_fig.add_trace(go.Scatter(x=result.recall, y=result.precision, mode="lines",
-                                             line=dict(color=GOLD, width=3), name="Model"))
+                                            line=dict(color=GOLD, width=3), name="Model"))
                 pr_fig.update_layout(title="Precision-Recall egri chizig'i", xaxis_title="Recall", yaxis_title="Precision")
                 show(pr_fig, height=360)
 
@@ -417,8 +403,8 @@ with tabs[1]:
             st.subheader("🔑 Eng muhim omillar (Feature importance)")
             top_imp = result.importances.head(15).sort_values()
             show(px.bar(top_imp, orientation="h", template="plotly_dark",
-                         labels={"value": "Ahamiyat darajasi", "index": "Omil"},
-                         color=top_imp.values, color_continuous_scale=[BLUE, GOLD]), height=420)
+                        labels={"value": "Ahamiyat darajasi", "index": "Omil"},
+                        color=top_imp.values, color_continuous_scale=[BLUE, GOLD]), height=420)
 
             st.write("")
             st.subheader("🎚️ Xavf darajalari chegarasi")
@@ -426,7 +412,6 @@ with tabs[1]:
             low_cut = t1.slider("Past ↔ O'rta chegara", 0.0, 1.0, 0.3, 0.01)
             high_cut = t2.slider("O'rta ↔ Yuqori chegara", 0.0, 1.0, 0.7, 0.01)
             if low_cut > high_cut:
-                st.warning("Past chegara Yuqori chegaradan katta bo'lmasligi kerak.")
                 high_cut = low_cut
 
             bands = scores.apply(lambda s: risk_band(s, low_cut, high_cut))
@@ -442,7 +427,7 @@ with tabs[1]:
             st.write("")
             st.subheader("🚨 Eng yuqori ustuvorlikdagi signallar")
             ranked = view.assign(AI_Risk_Score=scores.reindex(view.index).round(4),
-                                  Xavf_Darajasi=bands.reindex(view.index))
+                                 Xavf_Darajasi=bands.reindex(view.index))
             ranked = ranked.sort_values("AI_Risk_Score", ascending=False)
             ranked.insert(0, "Rank", np.arange(1, len(ranked) + 1))
             top_n = st.slider("Ko'rsatiladigan signallar soni", 10, min(200, len(ranked)), min(25, len(ranked)))
@@ -453,22 +438,14 @@ with tabs[1]:
                 file_name="ai_scored_signals.csv", mime="text/csv",
             )
 
-            if mask.sum() > 0:
-                with st.expander("📐 Confusion matrix (0.5 chegarada)"):
-                    preds = (result.oof >= 0.5).astype(int)
-                    cm = confusion_matrix(y_m, preds)
-                    show(px.imshow(cm, text_auto=True, template="plotly_dark",
-                                    x=["Bashorat: 0", "Bashorat: 1"], y=["Haqiqat: 0", "Haqiqat: 1"],
-                                    color_continuous_scale=[[0, "#111827"], [1, BLUE]]), height=340)
-
-# ---------- Taqsimot ----------
+# ---------- 3. Taqsimot ----------
 with tabs[2]:
     st.subheader("📈 Ustun taqsimoti")
     if num_cols:
         col1, col2 = st.columns([2, 1])
         col = col1.selectbox("Ustun", num_cols)
         bins = col2.slider("Bo'laklar soni", 10, 100, 30)
-        color_by = None
+        color_by = False
         if y_full is not None:
             color_by = st.checkbox("Target bo'yicha rangla", value=True)
         fig = px.histogram(
@@ -480,17 +457,18 @@ with tabs[2]:
     else:
         st.info("Raqamli ustunlar topilmadi.")
 
-# ---------- Bog'liqlik ----------
+# ---------- 4. Bog'liqlik (Zaxira bilan to'ldirilgan) ----------
 with tabs[3]:
     st.subheader("🔗 Ustunlar orasidagi korrelyatsiya")
     if len(num_cols) >= 2:
         show(px.imshow(view[num_cols].corr(), text_auto=".2f", template="plotly_dark",
-                        color_continuous_scale=[[0, CORAL], [0.5, "#111827"], [1, BLUE]],
-                        title="Korrelyatsiya matritsasi"), height=500)
+                       color_continuous_scale=[[0, CORAL], [0.5, "#111827"], [1, BLUE]],
+                       title="Korrelyatsiya matritsasi"), height=500)
     else:
-        st.info("Korrelyatsiya uchun kamida 2 ta raqamli ustun kerak.")
+        st.warning("⚠️ Korrelyatsiya matritsasini chizish uchun datasetda kamida 2 ta raqamli ustun bo'lishi kerak.")
+        st.info("Ma'lumotlar jadvalidagi ustun turlarini tekshiring yoki boshqa CSV yuklang.")
 
-# ---------- Vaqt tendensiyasi ----------
+# ---------- 5. Vaqt tendensiyasi (Zaxira bilan to'ldirilgan) ----------
 with tabs[4]:
     st.subheader("🕒 Vaqt bo'yicha tendensiya")
     if dt_cols:
@@ -501,25 +479,26 @@ with tabs[4]:
         if y_full is not None:
             grouped = pd.DataFrame({
                 "Jami signal": ts.resample(rule).size(),
-                "Alertlar": y_full.reindex(ts.index).resample(rule).sum() if y_full is not None else None,
+                "Alertlar": y_full.reindex(ts.index).resample(rule).sum(),
             }).fillna(0)
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=grouped.index, y=grouped["Jami signal"], name="Jami signal",
-                                      line=dict(color=BLUE, width=2)))
+                                     line=dict(color=BLUE, width=2)))
             fig.add_trace(go.Scatter(x=grouped.index, y=grouped["Alertlar"], name="Alertlar",
-                                      line=dict(color=CORAL, width=2)))
+                                     line=dict(color=CORAL, width=2)))
             fig.update_layout(title=f"{freq} kesimida signallar soni")
             show(fig)
         else:
             counts = ts.resample(rule).size()
             show(px.line(counts, template="plotly_dark", title=f"{freq} kesimida signallar soni",
-                          color_discrete_sequence=[BLUE]))
+                         color_discrete_sequence=[BLUE]))
     else:
-        st.info("Sana/vaqt turidagi ustun aniqlanmadi.")
+        st.warning("⚠️ Datasetda sana/vaqt (datetime) formatidagi ustun aniqlanmadi.")
+        st.info("Agar vaqt bo'yicha tahlil kerak bo'lsa, CSV faylingizga sana ustunini qo'shing yoki formatini to'g'rilang.")
 
-# ---------- Ma'lumotlar ----------
+# ---------- 6. Ma'lumotlar ----------
 with tabs[5]:
-    st.subheader("📋 Xom ma'lumotlar")
+    st.subheader("📋 Xom va filtrlangan ma'lumotlar")
     n_rows = st.slider("Ko'rsatiladigan qatorlar", 10, min(500, len(view)), min(20, len(view)))
     search_col = st.selectbox("Filtr uchun ustun (ixtiyoriy)", ["(yo'q)"] + cat_cols)
     filtered = view
@@ -529,5 +508,5 @@ with tabs[5]:
             filtered = filtered[filtered[search_col].astype(str).str.contains(q, case=False, na=False)]
     st.dataframe(gold_table(filtered.head(n_rows)), use_container_width=True)
     st.download_button("⬇️ Ko'rinishni CSV sifatida yuklab olish",
-                        filtered.to_csv(index=False).encode("utf-8"),
-                        file_name="filtered_signals.csv", mime="text/csv")
+                       filtered.to_csv(index=False).encode("utf-8"),
+                       file_name="filtered_signals.csv", mime="text/csv")
