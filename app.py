@@ -12,10 +12,6 @@ DATA_PATH = "train_signals.csv"
 TARGET_HINTS = ["label", "target", "is_alert", "alert", "suspicious", "is_fraud",
                 "fraud", "sar", "flag", "class", "y", "eskalatsiya"]
 
-GOLD = "#F5C451"
-BLUE = "#5B7CFA"
-CORAL = "#FF6B8B"
-
 st.set_page_config(page_title="WIUT Hackathon - AML AI Dashboard", page_icon="🛡️", layout="wide")
 
 st.markdown("""
@@ -107,17 +103,18 @@ with tabs[1]:
         st.warning("⚠️ AI ishlashi uchun chap menyudan to'g'ri **Target** ustunini tanlang.")
     else:
         try:
-            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
-            features = [c for c in numeric_cols if c != target_col]
+            # Target'dan boshqa barcha ustunlarni feature sifatida olamiz
+            features = [c for c in df.columns if c != target_col]
             
             if not features:
-                st.error("Model uchun mos raqamli ustunlar topilmadi.")
+                st.error("Model uchun ustunlar topilmadi.")
             else:
                 with st.spinner("AI model o'qitilmoqda va risklar baholanmoqda..."):
-                    X = df[features].fillna(0)
+                    # Matnli/kategorik ustunlarni ham avtomatik raqamga o'tkazamiz (One-Hot Encoding)
+                    X = pd.get_dummies(df[features]).astype(float).fillna(0)
+                    
                     model = RandomForestClassifier(n_estimators=100, max_depth=8, random_state=42, class_weight="balanced")
                     
-                    # Cross-validation bashoratlari
                     skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
                     oof = cross_val_predict(model, X, y, cv=skf, method="predict_proba")[:, 1]
                     model.fit(X, y)
@@ -143,8 +140,8 @@ with tabs[1]:
             st.error(f"AI modelini ishga tushirishda xatolik: {ex}")
 
 with tabs[2]:
-    if len(df.select_dtypes(include=[np.number]).columns) > 0:
-        col = st.selectbox("Grafik uchun ustun", df.select_dtypes(include=[np.number]).columns.tolist())
+    if len(df.columns) > 0:
+        col = st.selectbox("Grafik uchun ustun", df.columns.tolist())
         fig = px.histogram(df, x=col, template="plotly_dark", title=f"{col} taqsimoti")
         st.plotly_chart(fig, use_container_width=True)
 
@@ -152,4 +149,3 @@ with tabs[3]:
     st.subheader("📋 Ma'lumotlar jadvali")
     n = st.slider("Qatorlar soni", 5, 100, 20)
     st.dataframe(df.head(n), use_container_width=True)
-    
