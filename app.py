@@ -1,3 +1,10 @@
+"""
+WIUT Fintech Hackathon 2026 - AML Alert Prioritization Dashboard
+------------------------------------------------------------------
+Streamlit + scikit-learn asosidagi AML (Anti-Money Laundering) signallarni
+xavf darajasi bo'yicha ustuvorlashtiruvchi interaktiv panel.
+"""
+
 import io
 from dataclasses import dataclass
 
@@ -135,26 +142,46 @@ def to_binary(s: pd.Series) -> pd.Series | None:
     return (s == minority).astype(float).where(s.notna())
 
 
-def make_X(frame: pd.DataFrame, feats: list[str]) -> pd.DataFrame:
-    sub_cols = []
-    dfs = []
-    for c in feats:
-        if pd.api.types.is_numeric_dtype(frame[c]):
-            dfs.append(frame[[c]].astype(float))
-        elif pd.api.types.is_datetime64_any_dtype(frame[c]):
-            s = frame[c].astype("int64") // 10**9
-            dfs.append(pd.DataFrame({c: s.astype(float)}))
-        else:
-            # Matnli ustunlar juda ko'p xotira olmasligi uchun faqat 50 tadan kam noyob qiymati borlarini olamiz
-            if frame[c].nunique() < 50:
-                dum = pd.get_dummies(frame[c], prefix=c, drop_first=True).astype(float)
-                dfs.append(dum)
-    
-    if not dfs:
-        return pd.DataFrame(index=frame.index)
-    
-    X = pd.concat(dfs, axis=1)
-    return X.replace([np.inf, -np.inf], np.nan).fillna(0)
+MAX_ONE_HOT_CARDINALITY = 30  # bundan ko'p noyob qiymatga ega ustunlar one-hot qilinmaydi
+
+
+def make_X(frame: pd.DataFrame, feats: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    """
+    RAM-xavfsiz feature matritsasi tuzadi.
+
+    - Sana/vaqt ustunlari epoch soniyalarga aylantiriladi.
+    - Kam noyob qiymatli matn/kategoriya ustunlari one-hot (get_dummies) qilinadi.
+    - Ko'p noyob qiymatli (masalan, ID, tranzaksiya raqami, erkin matn) ustunlar
+      one-hot qilinmaydi — aks holda minglab ustun yaratilib, Streamlit Cloud'ning
+      cheklangan RAM'ini to'ldirib, ilova uzilib qolishi (connection lost) mumkin.
+      Bunday ustunlar o'rniga "chastota kodlash" (frequency encoding) qo'llanadi:
+      har bir qiymat o'zining datasetdagi uchrash sonига almashtiriladi — bitta
+      raqamli ustun, qo'shimcha xotira sarflamaydi.
+
+    Qaytaradi: (X, tashlab_yuborilgan_ogohlantirishlar)
+    """
+    sub = frame[feats].copy()
+    notes: list[str] = []
+
+    for c in sub.columns:
+        if pd.api.types.is_datetime64_any_dtype(sub[c]):
+            sub[c] = sub[c].astype("int64") // 10**9
+            sub[c] = sub[c].where(frame[c].notna())
+        elif sub[c].dtype == "object" or str(sub[c].dtype) == "category":
+            n_unique = sub[c].nunique(dropna=True)
+            if n_unique > MAX_ONE_HOT_CARDINALITY:
+                freq = sub[c].value_counts()
+                sub[c] = sub[c].map(freq)
+                notes.append(
+                    f"'{c}' ustuni {n_unique} noyob qiymatga ega — RAM tejash uchun "
+                    f"one-hot o'rniga chastota kodlash qo'llanildi."
+                )
+
+    X = pd.get_dummies(sub).astype(float)
+    X = X.replace([np.inf, -np.inf], np.nan)
+    return X.fillna(0), notes
+
+
 
 @dataclass(frozen=True)
 class ModelResult:
@@ -169,10 +196,11 @@ class ModelResult:
     recall: np.ndarray
 
 
+@st.cache_resource(show_spinner="AI model o'qitilmoqda...")
 def train_and_score(X: pd.DataFrame, y: np.ndarray, n_estimators: int, max_depth: int, n_splits: int) -> ModelResult:
     model = RandomForestClassifier(
         n_estimators=n_estimators, max_depth=max_depth, min_samples_leaf=1,
-        class_weight="balanced_subsample", n_jobs=-1, random_state=42,
+        class_weight="balanced_subsample", n_jobs=2, random_state=42,
     )
     skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
     oof = cross_val_predict(model, X, y, cv=skf, method="predict_proba")[:, 1]
@@ -241,6 +269,7 @@ with st.sidebar:
     uploaded = st.file_uploader("Boshqa CSV yuklash", type="csv")
     if st.button("🔄 Keshni tozalash", use_container_width=True):
         st.cache_data.clear()
+        st.cache_resource.clear()
         st.rerun()
 
 try:
@@ -312,7 +341,7 @@ with tabs[0]:
         st.success("Bo'sh qiymatlar topilmadi ✅")
     else:
         show(px.bar(miss.head(15) * 100, template="plotly_dark", title="Ustunlar bo'yicha bo'sh qiymatlar (%)",
-                    labels={"value": "%", "index": "Ustun"}, color_discrete_sequence=[CORAL]), height=360)
+                     labels={"value": "%", "index": "Ustun"}, color_discrete_sequence=[CORAL]), height=360)
 
 # ---------- AI Risk Prioritization ----------
 with tabs[1]:
@@ -339,16 +368,24 @@ with tabs[1]:
             st.error("Modelni o'qitish uchun har ikki sinfdan (0 va 1) yetarli namuna yo'q.")
         else:
             n_splits = max(2, min(n_splits_ui, n_pos, n_neg))
-            X_all = make_X(df_full, feats)
+            X_all, encoding_notes = make_X(df_full, feats)
+
+            if encoding_notes:
+                with st.expander(f"ℹ️ Kodlash haqida eslatma ({len(encoding_notes)})"):
+                    for note in encoding_notes:
+                        st.caption(f"• {note}")
 
             if X_all.shape[1] == 0:
-                st.error("❌ Tanlangan omillardan modelga yaroqli ustun hosil bo'lmadi.")
+                st.error(
+                    "❌ Tanlangan omillardan modelga yaroqli ustun hosil bo'lmadi. "
+                    "Bu odatda barcha tanlangan ustunlar bo'sh yoki noyob (unique) "
+                    "matn/ID qiymatlar bo'lganda yuz beradi. Boshqa omillarni tanlab ko'ring:"
+                )
+                st.write(df_full[feats].dtypes.rename("Tur").to_frame())
                 st.stop()
 
             X_m = X_all[mask]
-            
-            with st.spinner("AI model o'qitilmoqda va cross-validation ishlamoqda..."):
-                result = train_and_score(X_m, y_m, n_est, depth, n_splits)
+            result = train_and_score(X_m, y_m, n_est, depth, n_splits)
 
             scores = pd.Series(np.nan, index=df_full.index)
             scores.loc[mask] = result.oof
@@ -364,9 +401,9 @@ with tabs[1]:
             with g1:
                 roc_fig = go.Figure()
                 roc_fig.add_trace(go.Scatter(x=result.fpr, y=result.tpr, mode="lines",
-                                             line=dict(color=BLUE, width=3), name="Model"))
+                                              line=dict(color=BLUE, width=3), name="Model"))
                 roc_fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines",
-                                             line=dict(color=MUTED, dash="dash"), name="Tasodifiy"))
+                                              line=dict(color=MUTED, dash="dash"), name="Tasodifiy"))
                 roc_fig.update_layout(title="ROC egri chizig'i", xaxis_title="False Positive Rate", yaxis_title="True Positive Rate")
                 show(roc_fig, height=360)
             with g2:
@@ -380,8 +417,8 @@ with tabs[1]:
             st.subheader("🔑 Eng muhim omillar (Feature importance)")
             top_imp = result.importances.head(15).sort_values()
             show(px.bar(top_imp, orientation="h", template="plotly_dark",
-                        labels={"value": "Ahamiyat darajasi", "index": "Omil"},
-                        color=top_imp.values, color_continuous_scale=[BLUE, GOLD]), height=420)
+                         labels={"value": "Ahamiyat darajasi", "index": "Omil"},
+                         color=top_imp.values, color_continuous_scale=[BLUE, GOLD]), height=420)
 
             st.write("")
             st.subheader("🎚️ Xavf darajalari chegarasi")
@@ -389,6 +426,7 @@ with tabs[1]:
             low_cut = t1.slider("Past ↔ O'rta chegara", 0.0, 1.0, 0.3, 0.01)
             high_cut = t2.slider("O'rta ↔ Yuqori chegara", 0.0, 1.0, 0.7, 0.01)
             if low_cut > high_cut:
+                st.warning("Past chegara Yuqori chegaradan katta bo'lmasligi kerak.")
                 high_cut = low_cut
 
             bands = scores.apply(lambda s: risk_band(s, low_cut, high_cut))
@@ -404,7 +442,7 @@ with tabs[1]:
             st.write("")
             st.subheader("🚨 Eng yuqori ustuvorlikdagi signallar")
             ranked = view.assign(AI_Risk_Score=scores.reindex(view.index).round(4),
-                                 Xavf_Darajasi=bands.reindex(view.index))
+                                  Xavf_Darajasi=bands.reindex(view.index))
             ranked = ranked.sort_values("AI_Risk_Score", ascending=False)
             ranked.insert(0, "Rank", np.arange(1, len(ranked) + 1))
             top_n = st.slider("Ko'rsatiladigan signallar soni", 10, min(200, len(ranked)), min(25, len(ranked)))
@@ -414,6 +452,14 @@ with tabs[1]:
                 ranked.to_csv(index=False).encode("utf-8"),
                 file_name="ai_scored_signals.csv", mime="text/csv",
             )
+
+            if mask.sum() > 0:
+                with st.expander("📐 Confusion matrix (0.5 chegarada)"):
+                    preds = (result.oof >= 0.5).astype(int)
+                    cm = confusion_matrix(y_m, preds)
+                    show(px.imshow(cm, text_auto=True, template="plotly_dark",
+                                    x=["Bashorat: 0", "Bashorat: 1"], y=["Haqiqat: 0", "Haqiqat: 1"],
+                                    color_continuous_scale=[[0, "#111827"], [1, BLUE]]), height=340)
 
 # ---------- Taqsimot ----------
 with tabs[2]:
@@ -459,15 +505,15 @@ with tabs[4]:
             }).fillna(0)
             fig = go.Figure()
             fig.add_trace(go.Scatter(x=grouped.index, y=grouped["Jami signal"], name="Jami signal",
-                                     line=dict(color=BLUE, width=2)))
+                                      line=dict(color=BLUE, width=2)))
             fig.add_trace(go.Scatter(x=grouped.index, y=grouped["Alertlar"], name="Alertlar",
-                                     line=dict(color=CORAL, width=2)))
+                                      line=dict(color=CORAL, width=2)))
             fig.update_layout(title=f"{freq} kesimida signallar soni")
             show(fig)
         else:
             counts = ts.resample(rule).size()
             show(px.line(counts, template="plotly_dark", title=f"{freq} kesimida signallar soni",
-                         color_discrete_sequence=[BLUE]))
+                          color_discrete_sequence=[BLUE]))
     else:
         st.info("Sana/vaqt turidagi ustun aniqlanmadi.")
 
@@ -483,5 +529,5 @@ with tabs[5]:
             filtered = filtered[filtered[search_col].astype(str).str.contains(q, case=False, na=False)]
     st.dataframe(gold_table(filtered.head(n_rows)), use_container_width=True)
     st.download_button("⬇️ Ko'rinishni CSV sifatida yuklab olish",
-                       filtered.to_csv(index=False).encode("utf-8"),
-                       file_name="filtered_signals.csv", mime="text/csv")
+                        filtered.to_csv(index=False).encode("utf-8"),
+                        file_name="filtered_signals.csv", mime="text/csv")
