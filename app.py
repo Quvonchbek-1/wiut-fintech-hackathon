@@ -136,15 +136,25 @@ def to_binary(s: pd.Series) -> pd.Series | None:
 
 
 def make_X(frame: pd.DataFrame, feats: list[str]) -> pd.DataFrame:
-    sub = frame[feats].copy()
-    for c in sub.columns:
-        if pd.api.types.is_datetime64_any_dtype(sub[c]):
-            sub[c] = sub[c].astype("int64") // 10**9
-            sub[c] = sub[c].where(frame[c].notna())
-    X = pd.get_dummies(sub).astype(float)
-    X = X.replace([np.inf, -np.inf], np.nan)
-    return X.fillna(0)
-
+    sub_cols = []
+    dfs = []
+    for c in feats:
+        if pd.api.types.is_numeric_dtype(frame[c]):
+            dfs.append(frame[[c]].astype(float))
+        elif pd.api.types.is_datetime64_any_dtype(frame[c]):
+            s = frame[c].astype("int64") // 10**9
+            dfs.append(pd.DataFrame({c: s.astype(float)}))
+        else:
+            # Matnli ustunlar juda ko'p xotira olmasligi uchun faqat 50 tadan kam noyob qiymati borlarini olamiz
+            if frame[c].nunique() < 50:
+                dum = pd.get_dummies(frame[c], prefix=c, drop_first=True).astype(float)
+                dfs.append(dum)
+    
+    if not dfs:
+        return pd.DataFrame(index=frame.index)
+    
+    X = pd.concat(dfs, axis=1)
+    return X.replace([np.inf, -np.inf], np.nan).fillna(0)
 
 @dataclass(frozen=True)
 class ModelResult:
