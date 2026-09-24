@@ -1,484 +1,155 @@
-"""
-WIUT Fintech Hackathon 2026 - AML Alert Prioritization Dashboard
-------------------------------------------------------------------
-Streamlit + scikit-learn asosidagi AML (Anti-Money Laundering) signallarni
-xavf darajasi bo'yicha ustuvorlashtiruvchi interaktiv panel.
-"""
-
 import io
-from dataclasses import dataclass
-
 import numpy as np
 import pandas as pd
 import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import (
-    average_precision_score,
-    confusion_matrix,
-    precision_recall_curve,
-    roc_auc_score,
-    roc_curve,
-)
+from sklearn.metrics import roc_auc_score, average_precision_score
 from sklearn.model_selection import StratifiedKFold, cross_val_predict
 
-# ============================================================
-# SOZLAMALAR
-# ============================================================
 TEAM_ID = "C9B71210"
 DATA_PATH = "train_signals.csv"
-TARGET_HINTS = [
-    "label", "target", "is_alert", "alert", "suspicious", "is_fraud",
-    "fraud", "sar", "flag", "class", "y", "eskalatsiya",
-]
+TARGET_HINTS = ["label", "target", "is_alert", "alert", "suspicious", "is_fraud",
+                "fraud", "sar", "flag", "class", "y", "eskalatsiya"]
 
 GOLD = "#F5C451"
 BLUE = "#5B7CFA"
 CORAL = "#FF6B8B"
-GREEN = "#34D399"
-MUTED = "#94A3B8"
-RISK_COLORS = {"Past": GREEN, "O'rta": GOLD, "Yuqori": CORAL}
 
 st.set_page_config(page_title="WIUT Hackathon - AML AI Dashboard", page_icon="🛡️", layout="wide")
 
-# ============================================================
-# STIL
-# ============================================================
-CSS = """
+st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-html, body, .stApp, [class*="css"] { font-family: 'Inter', system-ui, -apple-system, sans-serif; }
-.stApp {
-    background:
-        radial-gradient(1100px 600px at 8% -10%, rgba(91,124,250,.18), transparent 60%),
-        radial-gradient(900px 500px at 100% 0%, rgba(168,85,247,.12), transparent 55%),
-        #0a0e1a;
-}
-#MainMenu, footer { visibility: hidden; }
-header[data-testid="stHeader"] { background: transparent; }
-.block-container { padding-top: 2rem; max-width: 1400px; }
-section[data-testid="stSidebar"] {
-    background: rgba(255,255,255,.03);
-    border-right: 1px solid rgba(255,255,255,.06);
-}
-h1, h2, h3, h4 { color: #e5e7eb; letter-spacing: -0.01em; }
+.stApp { background-color: #0a0e1a; color: #e5e7eb; font-family: 'Inter', sans-serif; }
 .hero {
-    padding: 28px 32px; margin-bottom: 22px; border-radius: 22px;
-    background: linear-gradient(135deg, rgba(91,124,250,.16), rgba(255,255,255,.03) 55%);
+    padding: 24px; border-radius: 16px; margin-bottom: 20px;
+    background: linear-gradient(135deg, rgba(91,124,250,.2), rgba(255,255,255,.02));
     border: 1px solid rgba(255,255,255,.08);
-    box-shadow: 0 20px 60px rgba(0,0,0,.35);
 }
-.hero .pill {
-    display: inline-block; padding: 5px 12px; border-radius: 999px; font-size: .78rem;
-    color: #c7d2fe; background: rgba(91,124,250,.16); border: 1px solid rgba(91,124,250,.35);
-}
-.hero h1 {
-    margin: 12px 0 6px; font-size: 2.5rem; font-weight: 800;
-    background: linear-gradient(90deg, #ffffff, #9db4ff);
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-}
-.hero p { margin: 0; color: #94a3b8; font-size: 1.02rem; }
-.hero .team {
-    display: inline-block; margin-top: 14px; padding: 6px 12px; border-radius: 10px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .85rem;
-    color: #cbd5e1; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.08);
-}
-[data-testid="stMetric"] {
-    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08);
-    border-radius: 18px; padding: 16px 18px; backdrop-filter: blur(10px);
-}
-[data-testid="stMetricLabel"] p { color: #94a3b8; font-size: .78rem; text-transform: uppercase; }
-[data-testid="stMetricValue"] { color: #F5C451; }
-.card {
-    background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.08);
-    border-radius: 18px; padding: 18px 20px; height: 100%;
-}
-.card h4 { margin: 0 0 6px; font-size: 1.02rem; }
-.card p { margin: 0; color: #94a3b8; font-size: .92rem; line-height: 1.5; }
-.risk-badge {
-    display: inline-block; padding: 3px 10px; border-radius: 999px;
-    font-size: .78rem; font-weight: 700;
-}
+[data-testid="stMetricValue"] { color: #F5C451 !important; }
 </style>
-"""
-st.markdown(CSS, unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-
-# ============================================================
-# YORDAMCHI FUNKSIYALAR
-# ============================================================
-@st.cache_data(show_spinner="Ma'lumotlar yuklanmoqda...")
-def load_csv(source) -> pd.DataFrame:
+@st.cache_data
+def load_csv(source):
     if isinstance(source, bytes):
         source = io.BytesIO(source)
-    df = pd.read_csv(source)
-    if df.empty:
-        raise ValueError("Fayl bo'sh yoki noto'g'ri formatda.")
-    for c in df.columns:
-        if df[c].dtype == "object" and any(k in c.lower() for k in ("date", "time", "sana", "vaqt")):
-            parsed = pd.to_datetime(df[c], errors="coerce")
-            if parsed.notna().mean() > 0.8:
-                df[c] = parsed
-    return df
+    return pd.read_csv(source)
 
+# Sarlavha
+st.markdown(f"""
+<div class="hero">
+    <span style="color: #93c5fd; font-size: 0.85rem;">WIUT Fintech Hackathon 2026 · AI in Finance Track</span>
+    <h1 style="margin: 5px 0; color: #ffffff;">AML Alert Prioritization & AI Risk Dashboard</h1>
+    <p style="margin: 0; color: #94a3b8;">Shubhali tranzaksiyalarni sun'iy intellekt yordamida ustuvorlashtirish tizimi</p>
+    <div style="margin-top: 10px; display: inline-block; padding: 4px 10px; background: rgba(255,255,255,.05); border-radius: 6px; font-family: monospace;">Jamoa ID: {TEAM_ID}</div>
+</div>
+""", unsafe_allow_html=True)
 
-def guess_target(df: pd.DataFrame) -> str | None:
-    lower = {c.lower(): c for c in df.columns}
-    for h in TARGET_HINTS:
-        if h in lower:
-            return lower[h]
-    binary_cols = [c for c in df.columns if df[c].nunique(dropna=True) == 2]
-    return binary_cols[0] if binary_cols else None
-
-
-def to_binary(s: pd.Series) -> pd.Series | None:
-    vals = s.dropna().unique()
-    if len(vals) != 2:
-        return None
-    if set(vals) <= {0, 1, True, False}:
-        return s.astype(float)
-    minority = s.value_counts().idxmin()
-    return (s == minority).astype(float).where(s.notna())
-
-
-def make_X(frame: pd.DataFrame, feats: list[str]) -> pd.DataFrame:
-    X = pd.get_dummies(frame[feats]).astype(float)
-    X = X.replace([np.inf, -np.inf], np.nan)
-    return X.fillna(0)
-
-
-@dataclass(frozen=True)
-class ModelResult:
-    oof: np.ndarray
-    model: RandomForestClassifier
-    importances: pd.Series
-    roc_auc: float
-    pr_auc: float
-    fpr: np.ndarray
-    tpr: np.ndarray
-    precision: np.ndarray
-    recall: np.ndarray
-
-
-@st.cache_resource(show_spinner="AI model o'qitilmoqda...")
-def train_and_score(X: pd.DataFrame, y: np.ndarray, n_estimators: int, max_depth: int, n_splits: int) -> ModelResult:
-    model = RandomForestClassifier(
-        n_estimators=n_estimators, max_depth=max_depth, min_samples_leaf=1,
-        class_weight="balanced_subsample", n_jobs=-1, random_state=42,
-    )
-    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
-    oof = cross_val_predict(model, X, y, cv=skf, method="predict_proba")[:, 1]
-    model.fit(X, y)
-    fpr, tpr, _ = roc_curve(y, oof)
-    precision, recall, _ = precision_recall_curve(y, oof)
-    importances = pd.Series(model.feature_importances_, index=X.columns).sort_values(ascending=False)
-    return ModelResult(
-        oof=oof, model=model, importances=importances,
-        roc_auc=roc_auc_score(y, oof), pr_auc=average_precision_score(y, oof),
-        fpr=fpr, tpr=tpr, precision=precision, recall=recall,
-    )
-
-
-def risk_band(score: float, low_cut: float, high_cut: float) -> str:
-    if pd.isna(score):
-        return "—"
-    if score >= high_cut:
-        return "Yuqori"
-    if score >= low_cut:
-        return "O'rta"
-    return "Past"
-
-
-def style_fig(fig, height=420):
-    fig.update_layout(
-        template="plotly_dark", paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="Inter, sans-serif", color="#cbd5e1"),
-        margin=dict(l=10, r=10, t=56, b=10), height=height,
-    )
-    return fig
-
-
-def show(fig, **kw):
-    st.plotly_chart(style_fig(fig, **kw), use_container_width=True, config={"displayModeBar": False})
-
-
-def gold_table(frame: pd.DataFrame):
-    nums = frame.select_dtypes(include=[np.number]).columns.tolist()
-    sty = frame.style
-    if nums:
-        sty = sty.set_properties(subset=nums, **{"color": GOLD, "font-weight": "600"})
-    return sty
-
-
-# ============================================================
-# SARLAVHA
-# ============================================================
-st.markdown(
-    f"""
-    <div class="hero">
-        <span class="pill">WIUT Fintech Hackathon 2026 · AI in Finance Track</span>
-        <h1>AML Alert Prioritization</h1>
-        <p>Shubhali signallarni sun'iy intellekt yordamida xavf darajasi bo'yicha ustuvorlashtirish paneli</p>
-        <span class="team">Jamoa ID · {TEAM_ID}</span>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-
-# ============================================================
-# MA'LUMOT YUKLASH
-# ============================================================
 with st.sidebar:
     st.header("⚙️ Sozlamalar")
     uploaded = st.file_uploader("Boshqa CSV yuklash", type="csv")
-    if st.button("🔄 Keshni tozalash", use_container_width=True):
-        st.cache_data.clear()
-        st.cache_resource.clear()
-        st.rerun()
 
 try:
-    df_full = load_csv(uploaded.getvalue() if uploaded else DATA_PATH)
-except FileNotFoundError:
-    st.error(f"❌ `{DATA_PATH}` topilmadi. Chap menyudan CSV faylni yuklang.")
-    st.stop()
+    df = load_csv(uploaded.getvalue() if uploaded else DATA_PATH)
 except Exception as e:
-    st.error(f"❌ Faylni o'qishda xatolik: {e}")
+    st.error(f"Faylni yuklashda xatolik: {e}")
     st.stop()
 
-num_cols = df_full.select_dtypes(include=[np.number]).columns.tolist()
-dt_cols = df_full.select_dtypes(include=["datetime64[ns]", "datetime"]).columns.tolist()
-cat_cols = [c for c in df_full.columns if c not in num_cols and c not in dt_cols]
+# Targetni avtomatik topish
+guessed = None
+for h in TARGET_HINTS:
+    for c in df.columns:
+        if h in c.lower():
+            guessed = c
+            break
+    if guessed: break
+
+if not guessed:
+    for c in df.columns:
+        if df[c].nunique(dropna=True) == 2:
+            guessed = c
+            break
 
 with st.sidebar:
-    st.divider()
-    guessed = guess_target(df_full)
-    options = ["(yo'q)"] + df_full.columns.tolist()
-    default_idx = options.index(guessed) if guessed else 0
-    target_col = st.selectbox("🎯 Target (alert/risk) ustuni", options, index=default_idx)
-    st.caption(f"📄 {len(df_full):,} qator · {len(df_full.columns)} ustun")
+    options = ["(yo'q)"] + df.columns.tolist()
+    target_col = st.selectbox("Target (alert/risk) ustuni", options, index=options.index(guessed) if guessed and guessed in options else 0)
 
-y_full = to_binary(df_full[target_col]) if target_col != "(yo'q)" else None
-if target_col != "(yo'q)" and y_full is None:
-    st.sidebar.warning("⚠️ Tanlangan ustun ikkilik (binary) emas — target sifatida ishlatib bo'lmaydi.")
+y = None
+if target_col != "(yo'q)":
+    vals = df[target_col].dropna().unique()
+    if len(vals) == 2:
+        minority = df[target_col].value_counts().idxmin()
+        y = (df[target_col] == minority).astype(float)
 
-view = df_full
-y_view = y_full.reindex(view.index) if y_full is not None else None
+# Metrikalar
+c1, c2, c3, c4 = st.columns(4)
+c1.metric("Jami Signallar", f"{len(df):,}")
+c2.metric("Ustunlar Soni", len(df.columns))
+c3.metric("Haqiqiy Alertlar", f"{int(y.sum()):,}" if y is not None else "Aniqlanmadi")
+c4.metric("Alert Ulushi", f"{y.mean():.2%}" if y is not None else "Aniqlanmadi")
+st.markdown("---")
 
-# ============================================================
-# YUQORI METRIKALAR
-# ============================================================
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Jami signallar", f"{len(view):,}")
-m2.metric("Ustunlar", len(view.columns))
-m3.metric("Bo'sh qiymatlar", f"{view.isnull().mean().mean():.1%}")
-m4.metric("Haqiqiy alertlar", f"{int(y_view.sum()):,}" if y_view is not None else "—")
-m5.metric("Alert ulushi", f"{y_view.mean():.2%}" if y_view is not None else "—")
-st.write("")
+tabs = st.tabs(["📌 Xulosa", "🤖 AI Risk Prioritization", "📈 Taqsimot", "📋 Ma'lumotlar"])
 
-tabs = st.tabs([
-    "📌 Xulosa", "🤖 AI Risk Prioritization", "📈 Taqsimot",
-    "🔗 Bog'liqlik", "🕒 Vaqt tendensiyasi", "📋 Ma'lumotlar",
-])
-
-# ---------- Xulosa ----------
 with tabs[0]:
-    st.subheader("💡 Loyiha haqida")
-    st.markdown(
-        "Ushbu panel AML (pul yuvishga qarshi kurash) signallarini sun'iy intellekt "
-        "yordamida xavf darajasi bo'yicha ustuvorlashtirish uchun mo'ljallangan. "
-        "Random Forest modeli tarixiy belgilangan (label) ma'lumotlar asosida o'qitiladi "
-        "va har bir yangi signalga 0 dan 1 gacha xavf balli beradi."
-    )
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.markdown('<div class="card"><h4>1️⃣ Ma\'lumot</h4><p>CSV formatidagi tranzaksiya/signal ma\'lumotlari yuklanadi va avtomatik tozalanadi.</p></div>', unsafe_allow_html=True)
-    with c2:
-        st.markdown('<div class="card"><h4>2️⃣ Model</h4><p>Random Forest cross-validation orqali o\'qitiladi, ROC-AUC va PR-AUC bilan baholanadi.</p></div>', unsafe_allow_html=True)
-    with c3:
-        st.markdown('<div class="card"><h4>3️⃣ Natija</h4><p>Signallar xavf balli bo\'yicha saralanadi va tekshiruvchilar uchun ustuvorlashtiriladi.</p></div>', unsafe_allow_html=True)
+    st.subheader("💡 Loyiha haqida qisqacha")
+    st.markdown("Ushbu tizim bank va moliya institutlari uchun AML (Anti-Money Laundering) qoidabuzarliklarini tezkor aniqlash va xavf darajasiga ko'ra birinchi o'ringa chiqarishga mo'ljallangan.")
+    if y is not None:
+        vc = df[target_col].astype(str).value_counts().reset_index()
+        vc.columns = ["Sinf", "Soni"]
+        fig = px.bar(vc, x="Sinf", y="Soni", color="Sinf", template="plotly_dark", title="Target taqsimoti")
+        st.plotly_chart(fig, use_container_width=True)
 
-    st.write("")
-    st.subheader("🧪 Ma'lumot sifati")
-    miss = df_full.isnull().mean().sort_values(ascending=False)
-    miss = miss[miss > 0]
-    if miss.empty:
-        st.success("Bo'sh qiymatlar topilmadi ✅")
-    else:
-        show(px.bar(miss.head(15) * 100, template="plotly_dark", title="Ustunlar bo'yicha bo'sh qiymatlar (%)",
-                     labels={"value": "%", "index": "Ustun"}, color_discrete_sequence=[CORAL]), height=360)
-
-# ---------- AI Risk Prioritization ----------
 with tabs[1]:
-    st.subheader("🤖 AI yordamida signallarni ustuvorlashtirish")
-    if y_full is None:
-        st.info("ℹ️ Chap menyudan ikkilik (binary) **Target** ustunini tanlang.")
+    st.subheader("🤖 AI Model va Risk Prioritization")
+    if y is None:
+        st.warning("⚠️ AI ishlashi uchun chap menyudan to'g'ri **Target** ustunini tanlang.")
     else:
-        cand = [c for c in df_full.columns if c != target_col]
+        try:
+            numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+            features = [c for c in numeric_cols if c != target_col]
+            
+            if not features:
+                st.error("Model uchun mos raqamli ustunlar topilmadi.")
+            else:
+                with st.spinner("AI model o'qitilmoqda va risklar baholanmoqda..."):
+                    X = df[features].fillna(0)
+                    model = RandomForestClassifier(n_estimators=100, max_depth=8, random_state=42, class_weight="balanced")
+                    
+                    # Cross-validation bashoratlari
+                    skf = StratifiedKFold(n_splits=3, shuffle=True, random_state=42)
+                    oof = cross_val_predict(model, X, y, cv=skf, method="predict_proba")[:, 1]
+                    model.fit(X, y)
+                    
+                    roc = roc_auc_score(y, oof)
+                    pr = average_precision_score(y, oof)
+                
+                k1, k2, k3 = st.columns(3)
+                k1.metric("ROC-AUC", f"{roc:.3f}")
+                k2.metric("PR-AUC", f"{pr:.3f}")
+                k3.metric("Model Holati", "Faol 🟢")
+                
+                res_df = df.copy()
+                res_df["AI_Risk_Score"] = oof
+                res_df = res_df.sort_values(by="AI_Risk_Score", ascending=False)
+                res_df.insert(0, "Rank", range(1, len(res_df) + 1))
+                
+                st.subheader("🚨 Eng yuqori xavfli signallar (Top Prioritized)")
+                st.dataframe(res_df.head(25), use_container_width=True, hide_index=True)
+                
+                st.download_button("⬇️ Ustuvor ro'yxatni yuklab olish (CSV)", res_df.to_csv(index=False).encode("utf-8"), file_name="ai_scored_signals.csv", mime="text/csv")
+        except Exception as ex:
+            st.error(f"AI modelini ishga tushirishda xatolik: {ex}")
 
-        with st.expander("⚙️ Model sozlamalari", expanded=True):
-            feats = st.multiselect("Model omillari (Features)", cand, default=cand)
-            s1, s2, s3 = st.columns(3)
-            n_est = s1.slider("Daraxtlar soni", 50, 300, 100, step=10)
-            depth = s2.slider("Maksimal chuqurlik", 3, 15, 6)
-            n_splits_ui = s3.slider("CV bo'laklari (folds)", 2, 5, 5)
-
-        mask = y_full.notna().values
-        y_m = y_full[mask].astype(int).values
-        n_pos, n_neg = int(y_m.sum()), int(len(y_m) - y_m.sum())
-
-        if not feats:
-            st.warning("Kamida bitta omil tanlang.")
-        elif n_pos < 2 or n_neg < 2:
-            st.error("Modelni o'qitish uchun har ikki sinfdan (0 va 1) yetarli namuna yo'q.")
-        else:
-            n_splits = max(2, min(n_splits_ui, n_pos, n_neg))
-            X_all = make_X(df_full, feats)
-            X_m = X_all[mask]
-
-            result = train_and_score(X_m, y_m, n_est, depth, n_splits)
-
-            scores = pd.Series(np.nan, index=df_full.index)
-            scores.loc[mask] = result.oof
-
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("ROC-AUC", f"{result.roc_auc:.3f}")
-            k2.metric("PR-AUC", f"{result.pr_auc:.3f}")
-            k3.metric("CV bo'laklari", n_splits)
-            k4.metric("Model holati", "Ishlayapti 🟢")
-
-            st.write("")
-            g1, g2 = st.columns(2)
-            with g1:
-                roc_fig = go.Figure()
-                roc_fig.add_trace(go.Scatter(x=result.fpr, y=result.tpr, mode="lines",
-                                              line=dict(color=BLUE, width=3), name="Model"))
-                roc_fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], mode="lines",
-                                              line=dict(color=MUTED, dash="dash"), name="Tasodifiy"))
-                roc_fig.update_layout(title="ROC egri chizig'i", xaxis_title="False Positive Rate", yaxis_title="True Positive Rate")
-                show(roc_fig, height=360)
-            with g2:
-                pr_fig = go.Figure()
-                pr_fig.add_trace(go.Scatter(x=result.recall, y=result.precision, mode="lines",
-                                             line=dict(color=GOLD, width=3), name="Model"))
-                pr_fig.update_layout(title="Precision-Recall egri chizig'i", xaxis_title="Recall", yaxis_title="Precision")
-                show(pr_fig, height=360)
-
-            st.write("")
-            st.subheader("🔑 Eng muhim omillar (Feature importance)")
-            top_imp = result.importances.head(15).sort_values()
-            show(px.bar(top_imp, orientation="h", template="plotly_dark",
-                         labels={"value": "Ahamiyat darajasi", "index": "Omil"},
-                         color=top_imp.values, color_continuous_scale=[BLUE, GOLD]), height=420)
-
-            st.write("")
-            st.subheader("🎚️ Xavf darajalari chegarasi")
-            t1, t2 = st.columns(2)
-            low_cut = t1.slider("Past ↔ O'rta chegara", 0.0, 1.0, 0.3, 0.01)
-            high_cut = t2.slider("O'rta ↔ Yuqori chegara", 0.0, 1.0, 0.7, 0.01)
-            if low_cut > high_cut:
-                st.warning("Past chegara Yuqori chegaradan katta bo'lmasligi kerak.")
-                high_cut = low_cut
-
-            bands = scores.apply(lambda s: risk_band(s, low_cut, high_cut))
-            band_counts = bands.value_counts().reindex(["Yuqori", "O'rta", "Past"]).fillna(0)
-            b1, b2, b3 = st.columns(3)
-            for col, label, color in zip((b1, b2, b3), ["Yuqori", "O'rta", "Past"], [CORAL, GOLD, GREEN]):
-                col.markdown(
-                    f'<div class="card"><span class="risk-badge" style="background:{color}22;color:{color};">{label}</span>'
-                    f'<h4 style="margin-top:10px;">{int(band_counts[label]):,} ta</h4></div>',
-                    unsafe_allow_html=True,
-                )
-
-            st.write("")
-            st.subheader("🚨 Eng yuqori ustuvorlikdagi signallar")
-            ranked = view.assign(AI_Risk_Score=scores.reindex(view.index).round(4),
-                                  Xavf_Darajasi=bands.reindex(view.index))
-            ranked = ranked.sort_values("AI_Risk_Score", ascending=False)
-            ranked.insert(0, "Rank", np.arange(1, len(ranked) + 1))
-            top_n = st.slider("Ko'rsatiladigan signallar soni", 10, min(200, len(ranked)), min(25, len(ranked)))
-            st.dataframe(gold_table(ranked.head(top_n)), use_container_width=True, hide_index=True)
-            st.download_button(
-                "⬇️ Barcha natijalarni CSV sifatida yuklab olish",
-                ranked.to_csv(index=False).encode("utf-8"),
-                file_name="ai_scored_signals.csv", mime="text/csv",
-            )
-
-            if mask.sum() > 0:
-                with st.expander("📐 Confusion matrix (0.5 chegarada)"):
-                    preds = (result.oof >= 0.5).astype(int)
-                    cm = confusion_matrix(y_m, preds)
-                    show(px.imshow(cm, text_auto=True, template="plotly_dark",
-                                    x=["Bashorat: 0", "Bashorat: 1"], y=["Haqiqat: 0", "Haqiqat: 1"],
-                                    color_continuous_scale=[[0, "#111827"], [1, BLUE]]), height=340)
-
-# ---------- Taqsimot ----------
 with tabs[2]:
-    st.subheader("📈 Ustun taqsimoti")
-    if num_cols:
-        col1, col2 = st.columns([2, 1])
-        col = col1.selectbox("Ustun", num_cols)
-        bins = col2.slider("Bo'laklar soni", 10, 100, 30)
-        color_by = None
-        if y_full is not None:
-            color_by = st.checkbox("Target bo'yicha rangla", value=True)
-        fig = px.histogram(
-            view, x=col, nbins=bins, template="plotly_dark", title=f"{col} taqsimoti",
-            color=y_full.reindex(view.index).map({0: "Normal", 1: "Alert"}) if (color_by and y_full is not None) else None,
-            color_discrete_sequence=[BLUE, CORAL],
-        )
-        show(fig)
-    else:
-        st.info("Raqamli ustunlar topilmadi.")
+    if len(df.select_dtypes(include=[np.number]).columns) > 0:
+        col = st.selectbox("Grafik uchun ustun", df.select_dtypes(include=[np.number]).columns.tolist())
+        fig = px.histogram(df, x=col, template="plotly_dark", title=f"{col} taqsimoti")
+        st.plotly_chart(fig, use_container_width=True)
 
-# ---------- Bog'liqlik ----------
 with tabs[3]:
-    st.subheader("🔗 Ustunlar orasidagi korrelyatsiya")
-    if len(num_cols) >= 2:
-        show(px.imshow(view[num_cols].corr(), text_auto=".2f", template="plotly_dark",
-                        color_continuous_scale=[[0, CORAL], [0.5, "#111827"], [1, BLUE]],
-                        title="Korrelyatsiya matritsasi"), height=500)
-    else:
-        st.info("Korrelyatsiya uchun kamida 2 ta raqamli ustun kerak.")
-
-# ---------- Vaqt tendensiyasi ----------
-with tabs[4]:
-    st.subheader("🕒 Vaqt bo'yicha tendensiya")
-    if dt_cols:
-        dcol = st.selectbox("Sana/vaqt ustuni", dt_cols)
-        freq = st.radio("Davriylik", ["Kun", "Hafta", "Oy"], horizontal=True)
-        rule = {"Kun": "D", "Hafta": "W", "Oy": "M"}[freq]
-        ts = view.dropna(subset=[dcol]).set_index(dcol)
-        if y_full is not None:
-            grouped = pd.DataFrame({
-                "Jami signal": ts.resample(rule).size(),
-                "Alertlar": y_full.reindex(ts.index).resample(rule).sum() if y_full is not None else None,
-            }).fillna(0)
-            fig = go.Figure()
-            fig.add_trace(go.Scatter(x=grouped.index, y=grouped["Jami signal"], name="Jami signal",
-                                      line=dict(color=BLUE, width=2)))
-            fig.add_trace(go.Scatter(x=grouped.index, y=grouped["Alertlar"], name="Alertlar",
-                                      line=dict(color=CORAL, width=2)))
-            fig.update_layout(title=f"{freq} kesimida signallar soni")
-            show(fig)
-        else:
-            counts = ts.resample(rule).size()
-            show(px.line(counts, template="plotly_dark", title=f"{freq} kesimida signallar soni",
-                          color_discrete_sequence=[BLUE]))
-    else:
-        st.info("Sana/vaqt turidagi ustun aniqlanmadi.")
-
-# ---------- Ma'lumotlar ----------
-with tabs[5]:
-    st.subheader("📋 Xom ma'lumotlar")
-    n_rows = st.slider("Ko'rsatiladigan qatorlar", 10, min(500, len(view)), min(20, len(view)))
-    search_col = st.selectbox("Filtr uchun ustun (ixtiyoriy)", ["(yo'q)"] + cat_cols)
-    filtered = view
-    if search_col != "(yo'q)":
-        q = st.text_input(f"'{search_col}' bo'yicha qidirish")
-        if q:
-            filtered = filtered[filtered[search_col].astype(str).str.contains(q, case=False, na=False)]
-    st.dataframe(gold_table(filtered.head(n_rows)), use_container_width=True)
-    st.download_button("⬇️ Ko'rinishni CSV sifatida yuklab olish",
-                        filtered.to_csv(index=False).encode("utf-8"),
-                        file_name="filtered_signals.csv", mime="text/csv")
+    st.subheader("📋 Ma'lumotlar jadvali")
+    n = st.slider("Qatorlar soni", 5, 100, 20)
+    st.dataframe(df.head(n), use_container_width=True)
+    
